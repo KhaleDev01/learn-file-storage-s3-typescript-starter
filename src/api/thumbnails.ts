@@ -5,6 +5,7 @@ import type { ApiConfig } from "../config";
 import type { BunRequest } from "bun";
 import { BadRequestError, NotFoundError, UserForbiddenError } from "./errors";
 import { File } from "buffer";
+import { randomBytes } from "crypto";
 
 type Thumbnail = {
   data: ArrayBuffer;
@@ -69,14 +70,15 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
   }
   const buffer = Buffer.from(imageData);
   const extension = mediaType.split("/")[1];
-  const filePath = `${cfg.assetsRoot}/${videoId}.${extension}`;
+  const randomName = randomBytes(32).toString("base64url");
+  const filePath = `${cfg.assetsRoot}/${randomName}.${extension}`;
   await Bun.write(filePath, buffer);
 
   if (metadata?.userID !== userID) {
     throw new UserForbiddenError("O you dont have the right");
   }
 
-  metadata.thumbnailURL = `http://localhost:${cfg.port}/assets/${videoId}.${extension}`;
+  metadata.thumbnailURL = `http://localhost:${cfg.port}/assets/${randomName}.${extension}`;
   updateVideo(cfg.db, metadata);
 
   return respondWithJSON(200, metadata);
