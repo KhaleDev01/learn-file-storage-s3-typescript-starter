@@ -42,9 +42,10 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const tmpPath = `${cfg.assetsRoot}/tmp_${randomBytes(32).toString("hex")}.mp4`;
   try {
     await Bun.write(tmpPath, await file.arrayBuffer());
+    const aspectRatio = await geteVideoAspectRatio(tmpPath);
     const extension = "mp4";
     const randomName = randomBytes(32).toString("hex");
-    const s3Key = `${randomName}.${extension}`;
+    const s3Key = `${aspectRatio}/${randomName}.${extension}`;
     const s3File = cfg.s3Client.file(s3Key);
     await s3File.write(Bun.file(tmpPath), {
       type: file.type,
@@ -56,4 +57,39 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
     await unlink(tmpPath).catch(() => {});
   }
   return respondWithJSON(200, metadata);
+}
+
+export async function geteVideoAspectRatio(filepath: string) {
+  //ffprobe -v error -print_format json -show_streams PATH_TO_VIDEO
+  const proc = Bun.spawn(
+    [
+      "ffprobe",
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height",
+      "-of",
+      "json",
+      filepath,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const stdoutText = await new Response(proc.stdout).text();
+  const stderrText = await new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    throw new BadRequestError(`ffprobe failed: ${stderrText}`);
+  }
+  const parsed = JSON.parse(stdoutText);
+  const { width, height } = parsed.streams[0];
+  const ratio = width / height;
+  if (Math.abs(ratio - 16 / 9) < 0.01) {
+    return "landscape";
+  } else if (Math.abs(ratio - 9 / 16) < 0.01) {
+    return "portrait";
+  } else {
+    return "other";
+  }
 }
