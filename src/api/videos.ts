@@ -7,7 +7,6 @@ import { BadRequestError, UserForbiddenError } from "./errors";
 import { getBearerToken, validateJWT } from "../auth";
 import { getVideo, updateVideo, type Video } from "../db/videos";
 import { unlink } from "fs/promises";
-import { s3 } from "bun";
 
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const MAX_UPLOAD_SIZE = 1 << 30;
@@ -53,29 +52,17 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
       type: file.type,
     });
     // const s3URL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${s3Key}`;
-    metadata.videoURL = s3Key;
+    const cloudFrontURL = `${cfg.s3CfDistribution}/${s3Key}`;
+    metadata.videoURL = cloudFrontURL;
     updateVideo(cfg.db, metadata);
   } finally {
     await unlink(tmpPath).catch(() => {});
     await unlink(`${tmpPath}.processed`).catch(() => {});
   }
-  const signedVideo = await dbVideoToSignedVideo(cfg, metadata);
-  return respondWithJSON(200, signedVideo);
+  return respondWithJSON(200, metadata);
+  //  https://ds4g9578hfe1d.cloudfront.net/
 }
-export async function generatePresignedUURL(
-  cfg: ApiConfig,
-  key: string,
-  expireTime: number,
-) {
-  const url = cfg.s3Client.presign(key, {
-    expiresIn: expireTime,
-  });
-  return url;
-}
-export async function dbVideoToSignedVideo(cfg: ApiConfig, video: Video) {
-  const signedURL = await generatePresignedUURL(cfg, video.videoURL!, 3600);
-  return { ...video, videoURL: signedURL };
-}
+
 export async function geteVideoAspectRatio(filepath: string) {
   //ffprobe -v error -print_format json -show_streams PATH_TO_VIDEO
   const proc = Bun.spawn(
