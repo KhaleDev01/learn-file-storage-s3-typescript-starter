@@ -5,8 +5,9 @@ import { type ApiConfig } from "../config";
 import type { BunRequest } from "bun";
 import { BadRequestError, UserForbiddenError } from "./errors";
 import { getBearerToken, validateJWT } from "../auth";
-import { getVideo, updateVideo } from "../db/videos";
+import { getVideo, updateVideo, type Video } from "../db/videos";
 import { unlink } from "fs/promises";
+import { s3 } from "bun";
 
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const MAX_UPLOAD_SIZE = 1 << 30;
@@ -43,22 +44,38 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   try {
     await Bun.write(tmpPath, await file.arrayBuffer());
     const aspectRatio = await geteVideoAspectRatio(tmpPath);
+    const processedPath = await processVideoForFastStart(tmpPath);
     const extension = "mp4";
     const randomName = randomBytes(32).toString("hex");
     const s3Key = `${aspectRatio}/${randomName}.${extension}`;
     const s3File = cfg.s3Client.file(s3Key);
-    await s3File.write(Bun.file(tmpPath), {
+    await s3File.write(Bun.file(processedPath), {
       type: file.type,
     });
-    const s3URL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${s3Key}`;
-    metadata.videoURL = s3URL;
+    // const s3URL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${s3Key}`;
+    metadata.videoURL = s3Key;
     updateVideo(cfg.db, metadata);
   } finally {
     await unlink(tmpPath).catch(() => {});
+    await unlink(`${tmpPath}.processed`).catch(() => {});
   }
-  return respondWithJSON(200, metadata);
+  const signedVideo = await dbVideoToSignedVideo(cfg, metadata);
+  return respondWithJSON(200, signedVideo);
 }
-
+export async function generatePresignedUURL(
+  cfg: ApiConfig,
+  key: string,
+  expireTime: number,
+) {
+  const url = cfg.s3Client.presign(key, {
+    expiresIn: expireTime,
+  });
+  return url;
+}
+export async function dbVideoToSignedVideo(cfg: ApiConfig, video: Video) {
+  const signedURL = await generatePresignedUURL(cfg, video.videoURL!, 3600);
+  return { ...video, videoURL: signedURL };
+}
 export async function geteVideoAspectRatio(filepath: string) {
   //ffprobe -v error -print_format json -show_streams PATH_TO_VIDEO
   const proc = Bun.spawn(
@@ -92,4 +109,31 @@ export async function geteVideoAspectRatio(filepath: string) {
   } else {
     return "other";
   }
+}
+
+export async function processVideoForFastStart(inputFilePath: string) {
+  const outputFilePath = `${inputFilePath}.processed`;
+  const proc = Bun.spawn(
+    [
+      "ffmpeg",
+      "-i",
+      inputFilePath,
+      "-movflags",
+      "faststart",
+      "-map_metadata",
+      "0",
+      "-codec",
+      "copy",
+      "-f",
+      "mp4",
+      outputFilePath,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const stderrText = await new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    throw new BadRequestError(`ffmpeg failed: ${stderrText}`);
+  }
+  return outputFilePath;
 }
